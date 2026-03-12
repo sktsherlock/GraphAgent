@@ -90,3 +90,91 @@ def build_hetero_graph_from_scaffold_keywords_v2(data_dict, add_edges_to_first_s
     data.scaffold_nodes_dlist = scaffold_nodes
     data.keyword_nodes_dict = keywords_of_scaffold_nodes
     return data
+
+
+def build_graph_with_derivation_edges(data_dict) -> HeteroData:
+    """
+    Builds a HeteroData graph using the derivation-based edge construction
+    described in the paper.
+
+    The paper states: *"if a new node is generated from the textual description
+    of a node in the previous iteration, we connect these two nodes."*
+
+    The ``derivation_edges`` dict produced by
+    :func:`run_iterative_two_phase_graph_generation` encodes exactly this
+    parent-child relationship::
+
+        derivation_edges: dict[int, list[int]]
+        # key   = unified_idx of the parent node
+        # value = list of unified_idx values of its child nodes
+
+    This function converts that mapping into explicit ``edge_index`` tensors
+    (shape ``(2, num_edges)``) stored in the returned ``HeteroData`` object
+    under the meta-path ``(src_type, "derives", dst_type)``.  These tensors
+    are consumed directly by the downstream Graph-Token Grounding module.
+
+    Args:
+        data_dict: Must contain:
+            - ``all_skg_nodes``: flat list of all nodes produced by the
+              Iterative Two-Phase workflow (each node must have ``unified_idx``,
+              ``name``, and optionally ``type``, ``description``,
+              ``augmented_description``).
+            - ``derivation_edges``: dict mapping parent ``unified_idx`` →
+              list of child ``unified_idx`` values.
+
+    Returns:
+        A ``HeteroData`` graph with node features, descriptions, and
+        derivation-based ``edge_index`` tensors per meta-path.
+    """
+    all_skg_nodes: list[dict] = data_dict.get("all_skg_nodes", [])
+    derivation_edges: dict[int, list[int]] = data_dict.get("derivation_edges", {})
+
+    # Build unified-index → node mapping for edge construction
+    idx_to_node: dict[int, dict] = {node["unified_idx"]: node for node in all_skg_nodes}
+
+    # Group nodes by type and assign local (type-scoped) indices
+    nodes_by_type: defaultdict = defaultdict(list)
+    for node in all_skg_nodes:
+        node_type = node.get("type", "concept")
+        node["local_idx"] = len(nodes_by_type[node_type])
+        nodes_by_type[node_type].append(node)
+
+    data = HeteroData()
+
+    # Add node features and descriptions
+    for node_type, nodes in nodes_by_type.items():
+        data[node_type].x = torch.zeros(len(nodes), 1)
+        data[node_type].unified_idx = torch.tensor([node["unified_idx"] for node in nodes])
+        data[node_type].description = [
+            f"Type: {node.get('type', 'concept')}; Name: {node['name']}; "
+            f"Description: {node.get('augmented_description', node.get('description', ''))}"
+            for node in nodes
+        ]
+
+    # Convert derivation_edges to edge_index tensors grouped by meta-path.
+    # Meta-path format: (src_type, "derives", dst_type)
+    for parent_unified_idx, child_unified_indices in derivation_edges.items():
+        parent_node = idx_to_node.get(parent_unified_idx)
+        if parent_node is None:
+            continue
+        src_type = parent_node.get("type", "concept")
+
+        for child_unified_idx in child_unified_indices:
+            child_node = idx_to_node.get(child_unified_idx)
+            if child_node is None:
+                continue
+            dst_type = child_node.get("type", "concept")
+            edge = torch.tensor(
+                [[parent_node["local_idx"]], [child_node["local_idx"]]]
+            )
+            if not hasattr(data[src_type, "derives", dst_type], "edge_index"):
+                data[src_type, "derives", dst_type].edge_index = edge
+            else:
+                data[src_type, "derives", dst_type].edge_index = torch.cat(
+                    [data[src_type, "derives", dst_type].edge_index, edge], dim=1
+                )
+
+    # Store raw data for downstream use
+    data.all_skg_nodes = all_skg_nodes
+    data.derivation_edges = derivation_edges
+    return data
