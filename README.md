@@ -7,7 +7,11 @@
 <p align="center">
 📖 <a href="https://arxiv.org/abs/2412.17029" target="_blank"> Paper at Arxiv</a> · 🤗 <a href="https://huggingface.co/GraphAgent/GraphAgent-7B" target="_blank">GraphAgent Model</a> · 🤗 <a href="https://huggingface.co/GraphAgent/GraphTokenizer" target="_blank">Graph Tokenizer Model</a> 
  · 🤗 <a href="https://huggingface.co/datasets/GraphAgent/GraphAgent-Datasets" target="_blank">GraphAgent Datasets</a>
-</p> 
+</p>
+
+<p align="center">
+🇨🇳 <a href="README_zh.md">中文文档 / Chinese README</a>
+</p>
 
 
 ## 📋 To-Do List
