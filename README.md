@@ -7,7 +7,11 @@
 <p align="center">
 📖 <a href="https://arxiv.org/abs/2412.17029" target="_blank"> Paper at Arxiv</a> · 🤗 <a href="https://huggingface.co/GraphAgent/GraphAgent-7B" target="_blank">GraphAgent Model</a> · 🤗 <a href="https://huggingface.co/GraphAgent/GraphTokenizer" target="_blank">Graph Tokenizer Model</a> 
  · 🤗 <a href="https://huggingface.co/datasets/GraphAgent/GraphAgent-Datasets" target="_blank">GraphAgent Datasets</a>
-</p> 
+</p>
+
+<p align="center">
+🇨🇳 <a href="README_zh.md">中文文档 / Chinese README</a>
+</p>
 
 
 ## 📋 To-Do List
@@ -173,6 +177,194 @@ The training code and procedures will be released in future updates. Stay tuned!
 | GraphAgent-Task Expert | 8B | 3.805 | 10.316 | 4.069 | 11.685 |
 | GraphAgent-General | 8B | **3.618*** | **8.000*** | **3.867*** | **8.775*** |
 
+
+## 🇨🇳 中文说明：GraphAgent 如何自动构建语义知识图谱
+
+GraphAgent 通过一套全自动的多智能体流水线来构建**语义知识图谱（Semantic Knowledge Graph, SKG）**。整个过程分为三个核心组件协同完成：
+
+### 一、三大核心组件
+
+| 组件 | 职责 |
+|---|---|
+| **图生成智能体（Graph Generator Agent）** | 从非结构化文本中自动构建语义知识图谱，反映复杂的语义依赖关系 |
+| **任务规划智能体（Task Planning Agent）** | 解析用户查询，通过自主规划将查询分解为可执行的子任务 |
+| **任务执行智能体（Task Execution Agent）** | 调用相应工具执行规划好的任务，完成预测或生成任务 |
+
+### 二、语义知识图谱的自动构建流程（迭代两阶段工作流）
+
+图生成智能体采用**迭代两阶段工作流**来完成 SKG 的自动构建：
+
+#### 第一阶段：骨架构建（Skeleton Construction）
+
+**步骤 0 — 初始脚手架节点提取**
+
+使用系统提示 `x_sys_sk_0`，以用户输入的 `knowledge_text`（知识文本）和 `user_annotation`（用户标注/任务描述）为输入，由大语言模型（LLM）自动提取出一组**顶层抽象概念节点**（即脚手架节点，scaffold nodes）。这些节点代表文本中最高层级的关键主题或实体。
+
+**步骤 1 … N — 迭代子节点推导**
+
+使用系统提示 `x_sys_sk_1`，对上一步生成的每个父节点，LLM 根据该父节点的描述文本生成更具体、更细粒度的**子节点**，并将父子关系记录为 `derivation_edges`（推导边）字典。此过程可迭代多轮，逐层细化图结构。
+
+#### 第二阶段：知识增强（Knowledge Augmentation）
+
+使用系统提示 `x_sys_ka`，对第一阶段生成的所有节点，LLM 依次为每个节点补充**详细描述**和**关键属性列表**，从而使每个节点携带丰富的语义信息。
+
+#### 图的落地与标记化（Graph Grounding & Tokenization）
+
+1. **图构建**：调用 `build_graph_with_derivation_edges` 函数，将所有节点和推导边转化为 `HeteroData` 异构图（`torch_geometric` 格式）。节点按类型分组并分配局部索引，推导边形成元路径 `(src_type, "derives", dst_type)` 的 `edge_index` 张量。
+
+2. **图标记化**：`hetero_graph_tokenize` 将异构图编码为连续的图 token，供后续的图动作智能体（Graph Action Agent）输入多模态 LLM，最终完成节点分类、文本生成等下游任务。
+
+### 三、完整流水线示意
+
+```
+用户输入 (文本 + 任务说明)
+       │
+       ▼
+任务规划智能体  →  解析查询，生成 knowledge_text / user_annotation
+       │
+       ▼
+图生成智能体
+  ├─ [Phase 1, Step 0]  x_sys_sk_0  →  顶层脚手架节点
+  ├─ [Phase 1, Step 1+] x_sys_sk_1  →  迭代推导子节点 + derivation_edges
+  └─ [Phase 2]          x_sys_ka    →  知识增强（描述 + 属性）
+       │
+       ▼
+图落地  build_graph_with_derivation_edges  →  HeteroData 异构图
+       │
+       ▼
+图标记化  hetero_graph_tokenize  →  图 token 序列
+       │
+       ▼
+图动作智能体（多模态 LLM）  →  最终预测 / 生成结果
+```
+
+### 四、关键设计亮点
+
+- **全自动**：无需人工标注图结构，LLM 从原始文本中端到端地抽取节点、构建边、增强知识。
+- **迭代细化**：通过多轮子节点推导，图结构从粗粒度到细粒度逐步完善，层次清晰。
+- **异构图**：节点和边均带有类型信息，支持复杂的元路径查询和图神经网络处理。
+- **任务自适应**：脚手架节点的抽取策略会根据任务类型（预测任务 vs. 生成任务）自动调整，确保图的语义与下游任务紧密对齐。
+
+---
+
+## 🇨🇳 中文说明：节点文本描述的存储、关联与 LLM 使用方式
+
+### 一、节点文本描述存储在哪里？
+
+LLM 生成的每个知识图谱节点的文本描述，以 **Python 列表**的形式直接存储在 `torch_geometric` 的 `HeteroData` 对象（即 `pyg_graph`）中，字段名为 `.description`。
+
+具体而言，图构建函数（`build_hetero_graph_from_scaffold_keywords_v2` 或 `build_graph_with_derivation_edges`）在创建 `HeteroData` 时，会为每种节点类型写入如下格式的描述字符串列表：
+
+```python
+# 脚手架节点（scaffold node）示例
+data[node_type].description = [
+    "Type: paper_contribution; Name: Mamba_model; Description: This paper introduces Mamba...",
+    ...
+]
+
+# 关键词节点（keyword node）示例
+data["keyword"].description = [
+    "Name: selective_state_space; Description: A mechanism that...",
+    ...
+]
+```
+
+此时节点的特征向量 `.x` 仅为全零占位张量（`torch.zeros(num_nodes, 1)`），真正的语义特征尚未填入。
+
+### 二、文本描述如何与知识图谱建立联系？
+
+文本描述与图结构的绑定分两步完成：
+
+**步骤 1 — 文本编码（`encode_node_text`）**
+
+在图标记化阶段（`graph_tokenizer.py`），`encode_node_text` 函数遍历每种节点类型，使用预训练的 `SentenceTransformer`（默认为 `all-mpnet-base-v2`）将每个描述字符串编码为 768 维的稠密语义向量，并**覆盖**原来的零占位张量，写回 `pyg_graph[node_type].x`：
+
+```python
+for node_type in pyg_graph.node_types:
+    for i, node_text in enumerate(node_set["description"]):
+        node_text_emb = sentence_transformer.encode([node_text], ...)
+        x_dict_type_i[i] = node_text_emb   # 768 维文本嵌入
+    node_set["x"] = x_dict_type_i           # 写回节点特征矩阵
+```
+
+**步骤 2 — 图神经网络聚合（`MetaHGTConv`）**
+
+768 维文本嵌入随即通过 **MetaHGT**（元异构图 Transformer）进行消息传递。MetaHGT 以节点类型名称和边类型名称的文本嵌入作为元参数，动态生成每种类型的注意力权重矩阵，将**图的拓扑结构信息**融合进每个节点的向量表示：
+
+```python
+res = metahgt_model(
+    x_dict=pyg_graph.x_dict,           # 各类型节点文本嵌入
+    edge_index_dict=pyg_graph.edge_index_dict,  # 图结构（推导边等）
+    node_type_feas_dict=...,            # 节点类型名称的嵌入
+    edge_type_feas_dict=...,            # 边类型名称的嵌入
+)
+pyg_graph.x_dict = res   # 聚合后的节点嵌入（同样为出通道维度）
+```
+
+经过这一步，每个节点的嵌入不仅包含自身的文本语义，还融合了邻居节点的语义和图的结构信息。
+
+### 三、节点嵌入如何让 LLM 能够使用？
+
+图嵌入通过**图 Token 插入**机制注入 LLM 的输入序列，整个过程如下：
+
+**① 构建带占位符的文本提示（`build_prompt`）**
+
+`build_input.py` 为每种节点类型在提示文本中插入一个 `<graph>` 占位符：
+
+```
+System: You are a powerful AI assistant...
+User: <user_instruction>
+Heterogeneous Knowledge Graph:
+  "concept" nodes: <graph>; "keyword" nodes: <graph>; ...
+```
+
+**② 将 `<graph>` 展开为 patch token 序列（`preprocess_graph_Hetero`）**
+
+该函数将每个 `<graph>` 替换为若干 `<g_patch>` token（数量等于该类型节点的数量），并在首尾分别加上 `<g_start>` / `<g_end>` 定界符：
+
+```
+<g_start><g_patch><g_patch>...<g_patch><g_end>
+          ←  num_nodes 个 patch token  →
+```
+
+**③ 在 LLM 的 forward 中注入图嵌入（`graphllm.py`）**
+
+`HeteroGraphLLMModel.forward` 在处理 embedding 序列时，找到每个 `<g_start>` 位置，将对应的节点嵌入通过线性投影层（`graph_projector: nn.Linear(graph_hidden_size, llm_hidden_size)`）映射到 LLM 隐层维度，再**原位替换** `<g_patch>` token 的 embedding：
+
+```python
+# 每个 <g_patch> 位置的 embedding 被替换为对应的节点嵌入（经 projector 变换）
+cur_new_input_embeds = torch.cat([
+    cur_input_embeds[: graph_start_token_pos + 1],
+    cur_graph_features,          # ← 投影后的节点嵌入向量组
+    cur_input_embeds[graph_start_token_pos + num_patches + 1 :],
+], dim=0)
+```
+
+这样，LLM 在自回归生成时，就能像处理文本 token 一样，通过注意力机制同时"看到"图节点的语义信息和原始用户指令，从而完成下游的预测或生成任务。
+
+### 四、完整数据流总结
+
+```
+LLM 生成节点描述（字符串）
+          │
+          ▼  存储于 pyg_graph[node_type].description（列表）
+          │
+          ▼  SentenceTransformer 编码 → 768 维向量
+          │  写入 pyg_graph[node_type].x
+          │
+          ▼  MetaHGTConv 图神经网络聚合（融合邻居 + 图结构）
+          │  更新 pyg_graph.x_dict
+          │
+          ▼  graph_projector 线性映射（768/GNN输出 → LLM隐层维度）
+          │
+          ▼  原位替换 <g_patch> token 的 embedding
+          │
+          ▼  LLM 注意力机制统一处理文本 token + 图节点嵌入
+          │
+          ▼  生成最终回答（分类标签 / 生成文本）
+```
+
+---
 
 ## 📝 Citation
 
