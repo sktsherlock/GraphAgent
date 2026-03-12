@@ -178,6 +178,75 @@ The training code and procedures will be released in future updates. Stay tuned!
 | GraphAgent-General | 8B | **3.618*** | **8.000*** | **3.867*** | **8.775*** |
 
 
+## 🇨🇳 中文说明：GraphAgent 如何自动构建语义知识图谱
+
+GraphAgent 通过一套全自动的多智能体流水线来构建**语义知识图谱（Semantic Knowledge Graph, SKG）**。整个过程分为三个核心组件协同完成：
+
+### 一、三大核心组件
+
+| 组件 | 职责 |
+|---|---|
+| **图生成智能体（Graph Generator Agent）** | 从非结构化文本中自动构建语义知识图谱，反映复杂的语义依赖关系 |
+| **任务规划智能体（Task Planning Agent）** | 解析用户查询，通过自主规划将查询分解为可执行的子任务 |
+| **任务执行智能体（Task Execution Agent）** | 调用相应工具执行规划好的任务，完成预测或生成任务 |
+
+### 二、语义知识图谱的自动构建流程（迭代两阶段工作流）
+
+图生成智能体采用**迭代两阶段工作流**来完成 SKG 的自动构建：
+
+#### 第一阶段：骨架构建（Skeleton Construction）
+
+**步骤 0 — 初始脚手架节点提取**
+
+使用系统提示 `x_sys_sk_0`，以用户输入的 `knowledge_text`（知识文本）和 `user_annotation`（用户标注/任务描述）为输入，由大语言模型（LLM）自动提取出一组**顶层抽象概念节点**（即脚手架节点，scaffold nodes）。这些节点代表文本中最高层级的关键主题或实体。
+
+**步骤 1 … N — 迭代子节点推导**
+
+使用系统提示 `x_sys_sk_1`，对上一步生成的每个父节点，LLM 根据该父节点的描述文本生成更具体、更细粒度的**子节点**，并将父子关系记录为 `derivation_edges`（推导边）字典。此过程可迭代多轮，逐层细化图结构。
+
+#### 第二阶段：知识增强（Knowledge Augmentation）
+
+使用系统提示 `x_sys_ka`，对第一阶段生成的所有节点，LLM 依次为每个节点补充**详细描述**和**关键属性列表**，从而使每个节点携带丰富的语义信息。
+
+#### 图的落地与标记化（Graph Grounding & Tokenization）
+
+1. **图构建**：调用 `build_graph_with_derivation_edges` 函数，将所有节点和推导边转化为 `HeteroData` 异构图（`torch_geometric` 格式）。节点按类型分组并分配局部索引，推导边形成元路径 `(src_type, "derives", dst_type)` 的 `edge_index` 张量。
+
+2. **图标记化**：`hetero_graph_tokenize` 将异构图编码为连续的图 token，供后续的图动作智能体（Graph Action Agent）输入多模态 LLM，最终完成节点分类、文本生成等下游任务。
+
+### 三、完整流水线示意
+
+```
+用户输入 (文本 + 任务说明)
+       │
+       ▼
+任务规划智能体  →  解析查询，生成 knowledge_text / user_annotation
+       │
+       ▼
+图生成智能体
+  ├─ [Phase 1, Step 0]  x_sys_sk_0  →  顶层脚手架节点
+  ├─ [Phase 1, Step 1+] x_sys_sk_1  →  迭代推导子节点 + derivation_edges
+  └─ [Phase 2]          x_sys_ka    →  知识增强（描述 + 属性）
+       │
+       ▼
+图落地  build_graph_with_derivation_edges  →  HeteroData 异构图
+       │
+       ▼
+图标记化  hetero_graph_tokenize  →  图 token 序列
+       │
+       ▼
+图动作智能体（多模态 LLM）  →  最终预测 / 生成结果
+```
+
+### 四、关键设计亮点
+
+- **全自动**：无需人工标注图结构，LLM 从原始文本中端到端地抽取节点、构建边、增强知识。
+- **迭代细化**：通过多轮子节点推导，图结构从粗粒度到细粒度逐步完善，层次清晰。
+- **异构图**：节点和边均带有类型信息，支持复杂的元路径查询和图神经网络处理。
+- **任务自适应**：脚手架节点的抽取策略会根据任务类型（预测任务 vs. 生成任务）自动调整，确保图的语义与下游任务紧密对齐。
+
+---
+
 ## 📝 Citation
 
 If you find this repository useful, please cite our paper:
