@@ -298,7 +298,7 @@ pip install -r GraphAgent-inference/requirements.txt
 
 - `GraphAgent/GraphAgent-8B`：多模态 Llama3，可接收图 Token 作为输入
 - `GraphAgent/GraphTokenizer`：多模态图-文分词器
-- `sentence-transformers/all-mpnet-base-v2`：文本图嵌入用的句子转换器
+- `sentence-transformers/all-mpnet-base-v2`：用于文本-图嵌入的句子转换器
 
 ### 配置 API Key
 
